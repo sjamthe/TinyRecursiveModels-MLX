@@ -1,2 +1,3 @@
 # TinyRecursiveModels-MLX
-implementation of TinyRecursiveModels
+
+Implementation of TinyRecursiveModels
