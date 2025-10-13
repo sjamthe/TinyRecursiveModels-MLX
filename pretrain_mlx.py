@@ -20,8 +20,8 @@ from omegaconf import DictConfig
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
-from models.sparse_embedding_mlx import CastedSparseEmbeddingSignSGD_MLX
-from models.ema_mlx import EMAHelper
+from models.sparse_embedding import CastedSparseEmbeddingSignSGD_MLX
+from models.ema import EMAHelper
 
 
 class LossConfig(pydantic.BaseModel):
