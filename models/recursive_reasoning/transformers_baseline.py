@@ -17,9 +17,8 @@ from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
 import math
 
-import torch
-import torch.nn.functional as F
-from torch import nn
+import mlx.core as mx
+import mlx.nn as nn
 from pydantic import BaseModel
 
 from models.common import trunc_normal_init_
@@ -29,17 +28,17 @@ from models.sparse_embedding import CastedSparseEmbedding
 
 @dataclass
 class Model_ACTV2InnerCarry:
-    z_H: torch.Tensor
+    z_H: mx.array
 
 
 @dataclass
 class Model_ACTV2Carry:
     inner_carry: Model_ACTV2InnerCarry
 
-    steps: torch.Tensor
-    halted: torch.Tensor
+    steps: mx.array
+    halted: mx.array
 
-    current_data: Dict[str, torch.Tensor]
+    current_data: Dict[str, mx.array]
 
 
 class Model_ACTV2Config(BaseModel):
@@ -88,7 +87,7 @@ class Model_ACTV2Block(nn.Module):
         )
         self.norm_eps = config.rms_norm_eps
 
-    def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
+    def __call__(self, cos_sin: CosSin, hidden_states: mx.array) -> mx.array:
         # Post Norm
         # Self Attention
         hidden_states = rms_norm(
@@ -104,9 +103,9 @@ class Model_ACTV2ReasoningModule(nn.Module):
     def __init__(self, layers: List[Model_ACTV2Block]):
         super().__init__()
 
-        self.layers = torch.nn.ModuleList(layers)
+        self.layers = layers
 
-    def forward(self, hidden_states: torch.Tensor, input_injection: torch.Tensor, **kwargs) -> torch.Tensor:
+    def __call__(self, hidden_states: mx.array, input_injection: mx.array, **kwargs) -> mx.array:
         # Input injection (add)
         hidden_states = hidden_states + input_injection
         # Layers
@@ -120,7 +119,7 @@ class Model_ACTV2_Inner(nn.Module):
     def __init__(self, config: Model_ACTV2Config) -> None:
         super().__init__()
         self.config = config
-        self.forward_dtype = getattr(torch, self.config.forward_dtype)
+        self.forward_dtype = getattr(mx, self.config.forward_dtype)
 
         # I/O
         self.embed_scale = math.sqrt(self.config.hidden_size)
@@ -169,20 +168,18 @@ class Model_ACTV2_Inner(nn.Module):
         )
 
         # Initial states
-        self.H_init = nn.Buffer(
-            trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1),
-            persistent=True,
+        self.H_init = mx.array(
+            trunc_normal_init_(mx.zeros(self.config.hidden_size, dtype=self.forward_dtype), std=1)
         )
 
         # Q head special init
         # Init Q to (almost) zero for faster learning during bootstrapping
-        with torch.no_grad():
-            self.q_head.weight.zero_()
-            self.q_head.bias.fill_(-5)  # type: ignore
+        self.q_head.weight = mx.zeros_like(self.q_head.weight)
+        self.q_head.bias = mx.full(self.q_head.bias.shape, -5, dtype=self.q_head.bias.dtype)
 
-    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
+    def _input_embeddings(self, input: mx.array, puzzle_identifiers: mx.array):
         # Token embedding
-        embedding = self.embed_tokens(input.to(torch.int32))
+        embedding = self.embed_tokens(input.astype(mx.int32))
 
         # Puzzle embeddings
         if self.config.puzzle_emb_ndim > 0:
@@ -190,38 +187,39 @@ class Model_ACTV2_Inner(nn.Module):
 
             pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
             if pad_count > 0:
-                puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
+                # Pad along the last dimension: (batch_size, current_dim) -> (batch_size, current_dim + pad_count)
+                puzzle_embedding = mx.pad(puzzle_embedding, ((0, 0), (0, pad_count)))
 
-            embedding = torch.cat(
-                (puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2
+            embedding = mx.concatenate(
+                [puzzle_embedding.reshape(puzzle_embedding.shape[0], self.puzzle_emb_len, self.config.hidden_size), embedding], axis=-2
             )
 
         # Position embeddings
         if self.config.pos_encodings == "learned":
             # scale by 1/sqrt(2) to maintain forward variance
-            embedding = 0.707106781 * (embedding + self.embed_pos.embedding_weight.to(self.forward_dtype))
+            embedding = 0.707106781 * (embedding + self.embed_pos.embedding_weight.astype(self.forward_dtype))
 
         # Scale
         return self.embed_scale * embedding
 
     def empty_carry(self, batch_size: int):
         return Model_ACTV2InnerCarry(
-            z_H=torch.empty(
-                batch_size,
+            z_H=mx.zeros(
+                (batch_size,
                 self.config.seq_len + self.puzzle_emb_len,
-                self.config.hidden_size,
+                self.config.hidden_size),
                 dtype=self.forward_dtype,
             ),
         )
 
-    def reset_carry(self, reset_flag: torch.Tensor, carry: Model_ACTV2InnerCarry):
+    def reset_carry(self, reset_flag: mx.array, carry: Model_ACTV2InnerCarry):
         return Model_ACTV2InnerCarry(
-            z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
+            z_H=mx.where(reset_flag[..., None, None], self.H_init, carry.z_H),
         )
 
-    def forward(
-        self, carry: Model_ACTV2InnerCarry, batch: Dict[str, torch.Tensor]
-    ) -> Tuple[Model_ACTV2InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def __call__(
+        self, carry: Model_ACTV2InnerCarry, batch: Dict[str, mx.array]
+    ) -> Tuple[Model_ACTV2InnerCarry, mx.array, Tuple[mx.array, mx.array]]:
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
@@ -234,12 +232,12 @@ class Model_ACTV2_Inner(nn.Module):
 
         # LM Outputs
         new_carry = Model_ACTV2InnerCarry(
-            z_H=z_H.detach(),
+            z_H=z_H,
         )  # New carry no grad
         output = self.lm_head(z_H)[:, self.puzzle_emb_len :]
 
         # Q head
-        q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
+        q_logits = self.q_head(z_H[:, 0]).astype(mx.float32)
 
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
@@ -256,33 +254,35 @@ class Model_ACTV2(nn.Module):
     def puzzle_emb(self):
         return self.inner.puzzle_emb
 
-    def initial_carry(self, batch: Dict[str, torch.Tensor]):
+    def initial_carry(self, batch: Dict[str, mx.array]):
         batch_size = batch["inputs"].shape[0]
 
         return Model_ACTV2Carry(
             inner_carry=self.inner.empty_carry(
                 batch_size
             ),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
-            steps=torch.zeros((batch_size,), dtype=torch.int32),
-            halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
-            current_data={k: torch.empty_like(v) for k, v in batch.items()},
+            steps=mx.zeros((batch_size,), dtype=mx.int32),
+            halted=mx.ones((batch_size,), dtype=mx.bool_),  # Default to halted
+            current_data={k: mx.zeros_like(v) for k, v in batch.items()},
         )
 
-    def forward(
+    def __call__(
         self,
         carry: Model_ACTV2Carry,
-        batch: Dict[str, torch.Tensor],
+        batch: Dict[str, mx.array],
         compute_target_q: bool = False,
-    ) -> Tuple[Model_ACTV2Carry, Dict[str, torch.Tensor]]:
+    ) -> Tuple[Model_ACTV2Carry, Dict[str, mx.array]]:
         # Update data, carry (removing halted sequences)
         new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
 
-        new_steps = torch.where(carry.halted, 0, carry.steps)
+        new_steps = mx.where(carry.halted, 0, carry.steps)
 
-        new_current_data = {
-            k: torch.where(carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)), batch[k], v)
-            for k, v in carry.current_data.items()
-        }
+        new_current_data = {}
+        for k, v in carry.current_data.items():
+            # Create broadcast mask for halted sequences
+            mask_shape = (batch[k].shape[0],) + (1,) * (batch[k].ndim - 1)
+            mask = mx.broadcast_to(carry.halted.reshape(mask_shape), mask_shape)
+            new_current_data[k] = mx.where(mask, batch[k], v)
 
         # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
@@ -291,51 +291,50 @@ class Model_ACTV2(nn.Module):
 
         outputs = {"logits": logits, "q_halt_logits": q_halt_logits, "q_continue_logits": q_continue_logits}
 
-        with torch.no_grad():
-            # Step
-            new_steps = new_steps + 1
-            is_last_step = new_steps >= self.config.halt_max_steps
+        # Step
+        new_steps = new_steps + 1
+        is_last_step = new_steps >= self.config.halt_max_steps
 
-            halted = is_last_step
+        halted = is_last_step
 
-            # Check if adaptive computation should be used
-            use_adaptive = (self.config.halt_max_steps > 1) and (
-                (self.training and self.config.act_enabled)
-                or (not self.training and self.config.act_inference)
-            )
+        # Check if adaptive computation should be used
+        use_adaptive = (self.config.halt_max_steps > 1) and (
+            (self.training and self.config.act_enabled)
+            or (not self.training and self.config.act_inference)
+        )
 
-            if use_adaptive:
-                # Halt signal based on Q-values (but always halt at max steps)
-                q_halt_signal = q_halt_logits > q_continue_logits
-                halted = halted | q_halt_signal
+        if use_adaptive:
+            # Halt signal based on Q-values (but always halt at max steps)
+            q_halt_signal = q_halt_logits > q_continue_logits
+            halted = halted | q_halt_signal
 
-                # Store actual steps used for logging (only during inference)
-                if not self.training:
-                    outputs["actual_steps"] = new_steps.float()
+            # Store actual steps used for logging (only during inference)
+            if not self.training:
+                outputs["actual_steps"] = new_steps.astype(mx.float32)
 
-                # Exploration (only during training)
-                if self.training:
-                    min_halt_steps = (
-                        torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
-                    ) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
-                    halted = halted & (new_steps >= min_halt_steps)
+            # Exploration (only during training)
+            if self.training:
+                min_halt_steps = (
+                    mx.random.uniform(q_halt_logits.shape) < self.config.halt_exploration_prob
+                ) * mx.random.randint(2, self.config.halt_max_steps + 1, q_halt_logits.shape)
+                halted = halted & (new_steps >= min_halt_steps)
 
-                # Compute target Q (only during training)
-                # NOTE: No replay buffer and target networks for computing target Q-value.
-                # As batch_size is large, there're many parallel envs.
-                # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                if self.training and compute_target_q:
-                    next_q_halt_logits, next_q_continue_logits = self.inner(
-                        new_inner_carry, new_current_data
-                    )[-1]
+            # Compute target Q (only during training)
+            # NOTE: No replay buffer and target networks for computing target Q-value.
+            # As batch_size is large, there're many parallel envs.
+            # Similar concept as PQN https://arxiv.org/abs/2407.04811
+            if self.training and compute_target_q:
+                _, _, (next_q_halt_logits, next_q_continue_logits) = self.inner(
+                    new_inner_carry, new_current_data
+                )
 
-                    outputs["target_q_continue"] = torch.sigmoid(
-                        torch.where(
-                            is_last_step,
-                            next_q_halt_logits,
-                            torch.maximum(next_q_halt_logits, next_q_continue_logits),
-                        )
+                outputs["target_q_continue"] = 1.0 / (1.0 + mx.exp(
+                    -mx.where(
+                        is_last_step,
+                        next_q_halt_logits,
+                        mx.maximum(next_q_halt_logits, next_q_continue_logits),
                     )
+                ))
 
         return Model_ACTV2Carry(
             new_inner_carry, new_steps, halted, new_current_data
