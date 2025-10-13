@@ -134,14 +134,22 @@ def load_model_from_checkpoint(checkpoint_path: str, config_path: str, metadata:
     model_cls = load_model_class(config["arch"]["name"])
     loss_head_cls = load_model_class(config["arch"]["loss"]["name"])
     
-    # Create model
-    model = model_cls(model_cfg)
-    # Only pass the loss_type parameter to ACTLossHead, not the entire config
-    model = loss_head_cls(model, loss_type=config["arch"]["loss"]["loss_type"])
-    
-    # Load checkpoint
+    # Load checkpoint first to check the structure
     print(f"Loading checkpoint from {checkpoint_path}")
     state_dict = mx.load(checkpoint_path)
+    
+    # Check if checkpoint has model. prefix (indicating it was saved with loss head)
+    has_model_prefix = any(key.startswith('model.') for key in state_dict.keys())
+    
+    if has_model_prefix:
+        print("Checkpoint was saved with loss head, creating model with loss head first")
+        # Create model with loss head first
+        model = model_cls(model_cfg)
+        model = loss_head_cls(model, loss_type=config["arch"]["loss"]["loss_type"])
+    else:
+        print("Checkpoint was saved without loss head, creating base model first")
+        # Create base model first
+        model = model_cls(model_cfg)
     
     # Handle _orig_mod prefix mismatch (from torch.compile)
     if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
@@ -155,7 +163,37 @@ def load_model_from_checkpoint(checkpoint_path: str, config_path: str, metadata:
                 new_state_dict[key] = value
         state_dict = new_state_dict
     
-    model.update(state_dict)
+    # If we created base model but checkpoint has model. prefix, we need to add loss head
+    if not has_model_prefix and any(key.startswith('model.') for key in state_dict.keys()):
+        print("Adding loss head to match checkpoint structure")
+        model = loss_head_cls(model, loss_type=config["arch"]["loss"]["loss_type"])
+    
+    # Try to update model using MLX's update method
+    try:
+        model.update(state_dict)
+        print("Model updated using MLX update method")
+    except Exception as e:
+        print(f"MLX update failed: {e}")
+        print("Falling back to manual parameter update...")
+        
+        # Manual parameter update as fallback
+        for key, value in state_dict.items():
+            try:
+                # Navigate to the parameter using the key path
+                parts = key.split('.')
+                obj = model
+                for part in parts[:-1]:
+                    # Handle list indexing (e.g., "layers.0" -> layers[0])
+                    if part.isdigit():
+                        obj = obj[int(part)]
+                    else:
+                        obj = getattr(obj, part)
+                setattr(obj, parts[-1], value)
+            except Exception as manual_e:
+                print(f"Failed to update {key}: {manual_e}")
+                # Skip this parameter if manual update fails
+                continue
+    
     model.eval()
     
     return model
@@ -173,7 +211,7 @@ def main():
     
     # Configuration
     dataset_path = "data/sudoku-extreme-1k-aug-1000"
-    checkpoint_path = "checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/pretrain_mlp_t_sudoku/step_6510"
+    checkpoint_path = "checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/pretrain_mlp_t_sudoku/step_6510_mlx.npz"
     config_path = "checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/pretrain_mlp_t_sudoku/all_config.yaml"
     
     # Check if custom Sudoku string is provided

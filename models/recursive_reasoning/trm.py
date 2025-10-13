@@ -168,8 +168,15 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             
             pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
             if pad_count > 0:
-                # Pad along the last dimension: (batch_size, current_dim) -> (batch_size, current_dim + pad_count)
-                puzzle_embedding = mx.pad(puzzle_embedding, ((0, 0), (0, pad_count)))
+                # Pad along the last dimension: handle both 2D and 3D cases
+                if puzzle_embedding.ndim == 2:
+                    # 2D case: (batch_size, current_dim) -> (batch_size, current_dim + pad_count)
+                    puzzle_embedding = mx.pad(puzzle_embedding, ((0, 0), (0, pad_count)))
+                elif puzzle_embedding.ndim == 3:
+                    # 3D case: (batch_size, 1, current_dim) -> (batch_size, 1, current_dim + pad_count)
+                    puzzle_embedding = mx.pad(puzzle_embedding, ((0, 0), (0, 0), (0, pad_count)))
+                else:
+                    raise ValueError(f"Unexpected puzzle_embedding dimensions: {puzzle_embedding.ndim}")
 
             embedding = mx.concatenate([puzzle_embedding.reshape(puzzle_embedding.shape[0], self.puzzle_emb_len, self.config.hidden_size), embedding], axis=-2)
 

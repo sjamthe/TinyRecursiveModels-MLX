@@ -20,7 +20,7 @@ def log_stablemax(x, axis=-1):
 
 
 def stablemax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask=None):
-    logprobs = log_stablemax(logits.astype(mx.float64), axis=-1)
+    logprobs = log_stablemax(logits.astype(mx.float32), axis=-1)
 
     if valid_mask is None:
         valid_mask = (labels != ignore_index)
