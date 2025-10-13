@@ -1,11 +1,10 @@
 import os
 import json
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Iterator
 import numpy as np
 import pydantic
 
-import torch
-from torch.utils.data import IterableDataset, get_worker_info
+import mlx.core as mx
 
 from models.losses import IGNORE_LABEL_ID
 from dataset.common import PuzzleDatasetMetadata
@@ -49,7 +48,7 @@ class PuzzleDatasetConfig(pydantic.BaseModel):
     rank: int
     num_replicas: int
 
-class PuzzleDataset(IterableDataset):
+class PuzzleDataset:
     def __init__(self, config: PuzzleDatasetConfig, split: str = "train"):
         super().__init__()
         self.config = config
@@ -162,8 +161,8 @@ class PuzzleDataset(IterableDataset):
             }
             batch = {k: np.pad(v, ((0, pad_size), ) + ((0, 0), ) * (v.ndim - 1), constant_values=pad_values[k]) for k, v in batch.items()}
 
-        # To tensor
-        return {k: torch.from_numpy(v) for k, v in batch.items()}
+        # To MLX array
+        return {k: mx.array(v) for k, v in batch.items()}
     
     def _iter_test(self):
         for set_i, (set_name, dataset) in enumerate(self._data.items()):  # type: ignore
@@ -237,9 +236,7 @@ class PuzzleDataset(IterableDataset):
                 yield set_name, batch, global_effective_batch_size
                 
     def __iter__(self):
-        worker_info = get_worker_info()
-        assert worker_info is None or worker_info.num_workers == 1, "Multithreaded data loading is not currently supported."
-        
+        # MLX doesn't use PyTorch's DataLoader workers
         self._lazy_load_dataset()
         
         # Iterate using specified mode

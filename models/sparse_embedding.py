@@ -52,7 +52,9 @@ class CastedSparseEmbeddingSignSGD(optim.Optimizer):
         if not 0.0 <= weight_decay:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
 
-        super().__init__(learning_rate=learning_rate, weight_decay=weight_decay)
+        super().__init__()
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
 
     def apply_single(self, gradient: mx.array, parameter: mx.array, state: dict) -> Tuple[mx.array, dict]:
         # Apply SignSGD with decoupled weight decay
