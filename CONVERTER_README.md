@@ -7,6 +7,7 @@ This tool converts PyTorch model checkpoints to MLX format for use with Apple's 
 - ✅ Converts PyTorch `state_dict` to MLX `npz` format
 - ✅ Handles BFloat16 tensors (converts to Float32)
 - ✅ Removes `torch.compile` prefixes (`_orig_mod.`)
+- ✅ Automatically adds runtime buffers for `CastedSparseEmbedding` modules
 - ✅ Verification mode to ensure conversion accuracy
 - ✅ Preserves weight shapes and values
 
@@ -69,6 +70,15 @@ python convert_torch_to_mlx.py \
 - Removes `_orig_mod.` prefix (added by `torch.compile`)
 - Example: `_orig_mod.model.inner.H_init` → `model.inner.H_init`
 
+### Runtime Buffers
+
+The converter automatically adds runtime buffers for `CastedSparseEmbedding` modules:
+
+- `local_weights`: Temporary buffer for training mode (initialized to zeros)
+- `local_ids`: Temporary buffer for puzzle identifiers (initialized to zeros)
+
+These buffers are required for MLX's `load_weights()` method to work properly.
+
 ### Data Type Handling
 
 - **BFloat16**: Automatically converted to Float32 (MLX/numpy compatibility)
@@ -114,8 +124,9 @@ Sample keys:
   _orig_mod.model.inner.L_init: shape=torch.Size([512]), dtype=torch.bfloat16
   _orig_mod.model.inner.embed_tokens.embedding_weight: shape=torch.Size([11, 512]), dtype=torch.float32
   ...
+  Added runtime buffers for model.inner.puzzle_emb
 
-Converted 15 parameters to MLX format
+Converted 17 parameters to MLX format
 
 Saving MLX checkpoint to: checkpoints/.../step_6510_mlx.npz
 Conversion complete!
@@ -126,7 +137,7 @@ File sizes:
 
 Verifying conversion...
 PyTorch keys: 15
-MLX keys: 15
+MLX keys: 17
 
 ✓ Verification passed! All tensors match within tolerance.
 ```
@@ -144,13 +155,22 @@ Install dependencies:
 pip install torch mlx numpy
 ```
 
-## Converted Checkpoint
+## Loading Converted Checkpoints
 
-The converted checkpoint `step_6510_mlx.npz` is ready to use with MLX models. You'll need to:
+The converted checkpoint `step_6510_mlx.npz` is ready to use with MLX models. To load:
 
-1. Implement the model architecture in MLX (similar to `models/recursive_reasoning/trm.py`)
-2. Load the weights using `mx.load()`
-3. Map the weights to your MLX model's parameters
+```python
+import mlx.nn as nn
+import mlx.core as mx
+
+# Create your model
+model = YourMLXModel()
+
+# Load weights using MLX's built-in method
+model.load_weights("step_6510_mlx.npz")
+```
+
+**Important**: Use `model.load_weights()` instead of `model.update()` for proper loading of nested module structures.
 
 ## Notes
 

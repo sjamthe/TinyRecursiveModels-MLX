@@ -130,6 +130,21 @@ def convert_checkpoint(
         
         mlx_state_dict[new_key] = mlx_array
     
+    # Add runtime buffers for CastedSparseEmbedding if puzzle_emb.weights exists
+    # These are needed for MLX's update() method to work properly
+    if any('puzzle_emb.weights' in k for k in mlx_state_dict.keys()):
+        for key in list(mlx_state_dict.keys()):
+            if 'puzzle_emb.weights' in key:
+                # Extract the prefix (e.g., "model.inner.puzzle_emb")
+                prefix = key.replace('.weights', '')
+                # Get the embedding dimension from the weights tensor
+                emb_dim = mlx_state_dict[key].shape[1]
+                # Add local_weights (batch_size=1 for inference) and local_ids
+                mlx_state_dict[f"{prefix}.local_weights"] = mx.zeros((1, emb_dim))
+                mlx_state_dict[f"{prefix}.local_ids"] = mx.zeros((1,), dtype=mx.int32)
+                if verbose:
+                    print(f"  Added runtime buffers for {prefix}")
+    
     if verbose:
         print(f"\nConverted {len(mlx_state_dict)} parameters to MLX format")
     
