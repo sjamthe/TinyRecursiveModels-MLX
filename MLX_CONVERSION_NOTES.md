@@ -212,3 +212,12 @@ These files were already converted:
 - MLX is optimized for Apple Silicon (M1/M2/M3 chips)
 - MLX uses unified memory architecture - no explicit device management needed
 - MLX automatically compiles computational graphs for efficiency
+
+## Changes to make this work
+- Didn't run out of the box on M3. 
+- I had to make several changes for MLX model as it didn't support some parameters attributes as expected. 
+- Modified pretrain.py, ema.py and trm.py
+- Model too large to run on 32GB M3 got OOM even with arch.H_cycles=2 arch.L_cycles=2 .
+- Modified cfg_pretrain.yaml with reduced global_batch_size: 768 -> 256.
+- This ran on M3 but extremely slow. About 3s/it. 1 EPOC would have taken 160 hours for training.
+- Epoc 0: 5734/195312 [12:43:18<153:10:43,  2.91s/it

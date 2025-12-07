@@ -685,8 +685,35 @@ def launch(hydra_config: DictConfig):
        progress_bar = tqdm.tqdm(total=train_state.total_steps)
        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
        # Count parameters in MLX model
-       num_params = sum(x.size for x in train_state.model.parameters().values())
-       wandb.log({"num_params": num_params}, step=0)
+       print("Counting model parameters...")
+
+       def _iter_params(prefix, obj):
+           """Recursively yield (full_name, leaf_param) for nested dict-like parameter containers."""
+           if isinstance(obj, dict):
+               for k, v in obj.items():
+                   new_prefix = f"{prefix}.{k}" if prefix else k
+                   yield from _iter_params(new_prefix, v)
+           else:
+               yield prefix, obj
+
+       params_map = train_state.model.parameters()
+       total_elements = 0
+       entry_count = 0
+       for full_name, p in _iter_params("", params_map):
+           entry_count += 1
+           shape = getattr(p, "shape", None)
+           # safe element count from shape
+           if shape is None:
+               n_elems = 0
+           else:
+               try:
+                   n_elems = int(np.prod(shape))
+               except Exception:
+                   n_elems = 0
+           total_elements += n_elems
+           print(entry_count, full_name, type(p), shape, f"elements={n_elems}")
+
+       print("Total parameters:", entry_count, "entries,", total_elements, "elements")
        save_code_and_config(config)
    if config.ema:
        print('Setup EMA')
@@ -710,7 +737,7 @@ def launch(hydra_config: DictConfig):
            if RANK == 0 and metrics is not None:
                wandb.log(metrics, step=train_state.step)
                progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
-           if config.ema:
+           if ema_helper:
                ema_helper.update(train_state.model)
 
 
